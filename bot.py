@@ -16,8 +16,8 @@ from telegram.constants import ParseMode
 # ══════════════════════════════════════════════════════════════
 #  НАСТРОЙКИ — берутся из переменных окружения Railway
 # ══════════════════════════════════════════════════════════════
-BOT_TOKEN = "8628100850:AAFOVAzCyAiXPd1uRc5hqlf7jtPzgIM0ecE"
-ADMIN_ID  = 1331379657
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+ADMIN_ID  = int(os.environ.get("ADMIN_ID", "0"))
 
 if not BOT_TOKEN:
     raise ValueError("❌ Переменная BOT_TOKEN не задана! Добавь её в настройках Railway.")
