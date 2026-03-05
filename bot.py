@@ -203,7 +203,7 @@ def del_portfolio(pid):
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOOK_TIME, BOOK_CONFIRM = range(2)
+BOOK_TIME, BOOK_CONFIRM, RESCHEDULE_PICK = range(3)
 ADMIN_WAIT_DATE, ADMIN_WAIT_TIME, ADMIN_WAIT_PHOTO, ADMIN_WAIT_CAPTION, ADMIN_WAIT_PRICE, ADMIN_WAIT_MONTH_DATE, ADMIN_WAIT_MONTH_TIME = range(4, 11)
 
 def fmt_date(d):
@@ -449,7 +449,7 @@ async def calendar_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not slots:
         await q.edit_message_text("😔 Слоты только что заняли. Выбери другую дату.")
         return ConversationHandler.END
-    kb = [[InlineKeyboardButton(f"🕐 {t}", callback_data=f"slot:{sid}:{t}")] for sid, t in slots]
+    kb = [[InlineKeyboardButton(f"🕐 {t}", callback_data=f"slot:{sid}|{t}")] for sid, t in slots]
     kb.append([InlineKeyboardButton("⬅️ Назад к календарю", callback_data="back_calendar")])
     await q.edit_message_text(
         f"📅 *{fmt_date(chosen_date)}*\n\nВыбери удобное время:",
@@ -473,9 +473,11 @@ async def back_to_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def booking_time_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    parts = q.data.split(":")
-    ctx.user_data["book_slot_id"] = int(parts[1])
-    ctx.user_data["book_time"]    = parts[2]
+    # format: slot:{sid}|{time}
+    _, rest = q.data.split(":", 1)
+    sid_str, t = rest.split("|", 1)
+    ctx.user_data["book_slot_id"] = int(sid_str)
+    ctx.user_data["book_time"]    = t
     await q.edit_message_text(
         f"📋 *Почти готово!*\n\n"
         f"📅 {fmt_date(ctx.user_data['book_date'])}\n"
@@ -530,7 +532,10 @@ async def my_bookings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb   = []
     for rid, d, t in rows:
         text += f"• {fmt_date(d)} в {t}\n"
-        kb.append([InlineKeyboardButton(f"❌ Отменить {fmt_date(d)} {t}", callback_data=f"mycancel:{rid}")])
+        kb.append([
+            InlineKeyboardButton(f"🔄 Перенести", callback_data=f"myreschedule:{rid}"),
+            InlineKeyboardButton(f"❌ Отменить",  callback_data=f"mycancel:{rid}"),
+        ])
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN,
                                     reply_markup=InlineKeyboardMarkup(kb))
 
@@ -539,6 +544,102 @@ async def my_cancel_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     cancel_booking(int(q.data.split(":")[1]))
     await q.edit_message_text("✅ Запись отменена. Слот снова свободен.")
+async def my_reschedule_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Клиент нажал Перенести — отменяем старый слот и открываем календарь"""
+    q = update.callback_query
+    await q.answer()
+    old_slot_id = int(q.data.split(":")[1])
+    ctx.user_data["reschedule_old_id"] = old_slot_id
+    free = get_free_dates()
+    if not free:
+        await q.edit_message_text("😔 Свободных слотов нет для переноса.")
+        return ConversationHandler.END
+    now = datetime.now()
+    ctx.user_data["cal_year"]  = now.year
+    ctx.user_data["cal_month"] = now.month
+    await q.edit_message_text(
+        "🔄 *Перенос записи*\n\nВыбери новую дату:\n\n✦число✦ — свободно\n· число · — занято",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=build_calendar(now.year, now.month, free)
+    )
+    return RESCHEDULE_PICK
+
+async def reschedule_navigate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, year, month = q.data.split(":")
+    year, month = int(year), int(month)
+    ctx.user_data["cal_year"]  = year
+    ctx.user_data["cal_month"] = month
+    await q.edit_message_reply_markup(reply_markup=build_calendar(year, month, get_free_dates()))
+
+async def reschedule_pick_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    chosen_date = q.data.split(":")[1]
+    ctx.user_data["reschedule_date"] = chosen_date
+    slots = get_free_slots(chosen_date)
+    if not slots:
+        await q.edit_message_text("😔 Слоты только что заняли. Выбери другую дату.")
+        return ConversationHandler.END
+    kb = [[InlineKeyboardButton(f"🕐 {t}", callback_data=f"rslot:{sid}|{t}")] for sid, t in slots]
+    kb.append([InlineKeyboardButton("⬅️ Назад к календарю", callback_data="rback_calendar")])
+    await q.edit_message_text(
+        f"📅 *{fmt_date(chosen_date)}*\n\nВыбери новое время:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+    return RESCHEDULE_PICK
+
+async def reschedule_back_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    year  = ctx.user_data.get("cal_year",  datetime.now().year)
+    month = ctx.user_data.get("cal_month", datetime.now().month)
+    await q.edit_message_text(
+        "🔄 *Перенос записи*\n\nВыбери новую дату:\n\n✦число✦ — свободно\n· число · — занято",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=build_calendar(year, month, get_free_dates())
+    )
+    return RESCHEDULE_PICK
+
+async def reschedule_pick_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, rest = q.data.split(":", 1)
+    sid_str, t = rest.split("|", 1)
+    new_slot_id  = int(sid_str)
+    new_date     = ctx.user_data["reschedule_date"]
+    old_slot_id  = ctx.user_data["reschedule_old_id"]
+    user         = q.from_user
+
+    # Получаем данные старой записи
+    with sqlite3.connect(DB) as c:
+        old = c.execute("SELECT name, phone FROM slots WHERE id=?", (old_slot_id,)).fetchone()
+
+    if not old:
+        await q.edit_message_text("⚠️ Старая запись не найдена.")
+        return ConversationHandler.END
+
+    name, phone = old
+    cancel_booking(old_slot_id)
+    book_slot(new_slot_id, user.id, user.username or "", name, phone)
+
+    await q.edit_message_text(
+        f"🔄 *Запись перенесена!*\n\n"
+        f"📅 {fmt_date(new_date)}\n"
+        f"🕐 {t}\n"
+        f"👤 {name}\n📞 {phone}\n\nБуду ждать! 💅",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await ctx.bot.send_message(
+        ADMIN_ID,
+        f"🔄 *Перенос записи!*\n📅 {fmt_date(new_date)} | 🕐 {t}\n👤 {name} | 📞 {phone}\n🆔 @{user.username or user.first_name}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return ConversationHandler.END
+
+
 
 # ══════════════════════════════════════════════════════════════
 #  ПАНЕЛЬ МАСТЕРА
@@ -932,11 +1033,33 @@ def main():
         per_user=True,
     )
 
+    reschedule_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(my_reschedule_cb, pattern="^myreschedule:")],
+        states={
+            RESCHEDULE_PICK: [
+                CallbackQueryHandler(reschedule_navigate,     pattern="^cal_nav:"),
+                CallbackQueryHandler(calendar_busy,           pattern="^cal_busy$"),
+                CallbackQueryHandler(calendar_ignore,         pattern="^cal_ignore$"),
+                CallbackQueryHandler(reschedule_pick_date,    pattern="^cal_pick:"),
+                CallbackQueryHandler(reschedule_back_calendar,pattern="^rback_calendar$"),
+                CallbackQueryHandler(reschedule_pick_time,    pattern="^rslot:"),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("start",  cmd_start),
+            CommandHandler("cancel", cmd_cancel),
+        ],
+        per_message=False,
+        per_chat=True,
+        per_user=True,
+    )
+
     app.add_handler(CommandHandler("start",   cmd_start))
     app.add_handler(CommandHandler("cancel",  cmd_cancel))
     app.add_handler(CommandHandler("slots",   cmd_slots))
     app.add_handler(CommandHandler("addmonth", cmd_addmonth))
     app.add_handler(CommandHandler("addslot", cmd_addslot))
+    app.add_handler(reschedule_conv)
     app.add_handler(booking_conv)
     app.add_handler(admin_slot_conv)
     app.add_handler(admin_photo_conv)
