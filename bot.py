@@ -322,9 +322,75 @@ async def cmd_addslot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
 
+
 # ══════════════════════════════════════════════════════════════
-#  ПОРТФОЛИО
+#  /addmonth — добавить слоты на весь месяц
+#  Пример: /addmonth 06.2026 10:00 12:40 14:20 17:00 19:40
+#  Или с выходными: /addmonth 06.2026 10:00 12:00 --no-weekend
 # ══════════════════════════════════════════════════════════════
+async def cmd_addmonth(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    args = ctx.args
+    if not args or len(args) < 2:
+        await update.message.reply_text(
+            "Использование:\n/addmonth 06.2026 10:00 12:40 14:20 17:00 19:40\n\n"
+            "Добавляет время на каждый день месяца.\n\n"
+            "Чтобы пропустить выходные (сб/вс):\n/addmonth 06.2026 10:00 14:00 --no-weekend",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    no_weekend = "--no-weekend" in args
+    time_args = [a for a in args[1:] if a != "--no-weekend"]
+    try:
+        month_dt = datetime.strptime(args[0], "%m.%Y")
+    except ValueError:
+        await update.message.reply_text(
+            "Неверный формат. Пример: /addmonth 06.2026 10:00 14:00",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    times, bad_times = [], []
+    for t in time_args:
+        try:
+            datetime.strptime(t, "%H:%M")
+            times.append(t)
+        except ValueError:
+            bad_times.append(t)
+    if not times:
+        await update.message.reply_text("Не указано ни одного времени.")
+        return
+    year = month_dt.year
+    month = month_dt.month
+    _, days_count = calendar.monthrange(year, month)
+    today = date.today()
+    added_days = skipped_days = skipped_weekend = 0
+    for day in range(1, days_count + 1):
+        d = date(year, month, day)
+        if d < today:
+            continue
+        if no_weekend and d.weekday() in (5, 6):
+            skipped_weekend += 1
+            continue
+        d_str = d.strftime("%Y-%m-%d")
+        day_added = any(add_slot(d_str, t) for t in times)
+        if day_added:
+            added_days += 1
+        else:
+            skipped_days += 1
+    month_name = MONTHS_RU[month]
+    msg = f"*{month_name} {year}*\n\n"
+    msg += f"Добавлено дней: *{added_days}*\n"
+    msg += f"Время: {', '.join(times)}\n"
+    if skipped_weekend:
+        msg += f"Пропущено выходных: {skipped_weekend}\n"
+    if skipped_days:
+        msg += f"Уже были: {skipped_days} дн.\n"
+    if bad_times:
+        msg += f"Не распознаны: {', '.join(bad_times)}\n"
+    msg += "\nКлиенты видят свободные даты!"
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
 async def show_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(get_price_list(), parse_mode=ParseMode.MARKDOWN)
 
@@ -756,6 +822,7 @@ def main():
     app.add_handler(CommandHandler("start",   cmd_start))
     app.add_handler(CommandHandler("cancel",  cmd_cancel))
     app.add_handler(CommandHandler("slots",   cmd_slots))
+    app.add_handler(CommandHandler("addmonth", cmd_addmonth))
     app.add_handler(CommandHandler("addslot", cmd_addslot))
     app.add_handler(booking_conv)
     app.add_handler(admin_slot_conv)
