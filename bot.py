@@ -204,7 +204,7 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 BOOK_TIME, BOOK_CONFIRM = range(2)
-ADMIN_WAIT_DATE, ADMIN_WAIT_TIME, ADMIN_WAIT_PHOTO, ADMIN_WAIT_CAPTION, ADMIN_WAIT_PRICE = range(4, 9)
+ADMIN_WAIT_DATE, ADMIN_WAIT_TIME, ADMIN_WAIT_PHOTO, ADMIN_WAIT_CAPTION, ADMIN_WAIT_PRICE, ADMIN_WAIT_MONTH_DATE, ADMIN_WAIT_MONTH_TIME = range(4, 11)
 
 def fmt_date(d):
     try:
@@ -551,7 +551,8 @@ async def admin_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "⚙️ *Панель мастера*\n\nЧто хочешь сделать?",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Добавить слот",        callback_data="adm:add_slot")],
+            [InlineKeyboardButton("➕ Добавить один день",   callback_data="adm:add_slot")],
+            [InlineKeyboardButton("📆 Добавить весь месяц",    callback_data="adm:add_month")],
             [InlineKeyboardButton("🗑 Удалить слот",         callback_data="adm:del_slot")],
             [InlineKeyboardButton("📋 Все записи",           callback_data="adm:bookings")],
             [InlineKeyboardButton("🖼 Добавить в портфолио", callback_data="adm:add_photo")],
@@ -559,6 +560,100 @@ async def admin_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💰 Редактировать прайс",   callback_data="adm:edit_price")],
         ])
     )
+
+async def admin_add_month_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        "*📆 Добавить весь месяц*\n\n"
+        "Введи месяц и год в формате *ММ.ГГГГ*\n\n"
+        "_Например: 06.2026_\n\n"
+        "/cancel — отмена",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return ADMIN_WAIT_MONTH_DATE
+
+async def admin_got_month_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        month_dt = datetime.strptime(text, "%m.%Y")
+        ctx.user_data["adm_month"] = text
+        ctx.user_data["adm_month_dt"] = month_dt
+        month_name = MONTHS_RU[month_dt.month]
+        await update.message.reply_text(
+            f"✅ Месяц: *{month_name} {month_dt.year}*\n\n"
+            "⏰ Введи время(а) через запятую:\n"
+            "_Например: 10:00, 12:40, 14:20, 17:00, 19:40_\n\n"
+            "Чтобы пропустить выходные, добавь в конце: *без выходных*\n"
+            "_Например: 10:00, 14:00, без выходных_\n\n"
+            "/cancel — отмена",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ADMIN_WAIT_MONTH_TIME
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Неверный формат!\nВведи месяц так: *06.2026*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ADMIN_WAIT_MONTH_DATE
+
+async def admin_got_month_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    no_weekend = "без выходных" in text.lower()
+    time_parts = [t.strip() for t in text.lower().replace("без выходных", "").split(",") if t.strip()]
+
+    times, bad_times = [], []
+    for t in time_parts:
+        try:
+            datetime.strptime(t, "%H:%M")
+            times.append(t)
+        except ValueError:
+            if t:
+                bad_times.append(t)
+
+    if not times:
+        await update.message.reply_text(
+            "⚠️ Не распознано ни одного времени.\nВведи: *10:00, 12:40, 14:20*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ADMIN_WAIT_MONTH_TIME
+
+    month_dt = ctx.user_data["adm_month_dt"]
+    year = month_dt.year
+    month = month_dt.month
+    _, days_count = calendar.monthrange(year, month)
+    today = date.today()
+    added_days = skipped_days = skipped_weekend = 0
+
+    for day in range(1, days_count + 1):
+        d = date(year, month, day)
+        if d < today:
+            continue
+        if no_weekend and d.weekday() in (5, 6):
+            skipped_weekend += 1
+            continue
+        d_str = d.strftime("%Y-%m-%d")
+        day_added = any(add_slot(d_str, t) for t in times)
+        if day_added:
+            added_days += 1
+        else:
+            skipped_days += 1
+
+    month_name = MONTHS_RU[month]
+    msg = f"📆 *{month_name} {year}*\n\n"
+    msg += f"✅ Добавлено дней: *{added_days}*\n"
+    msg += "🕐 Время: " + ", ".join(times) + "\n"
+    if skipped_weekend:
+        msg += f"📴 Пропущено выходных: {skipped_weekend}\n"
+    if skipped_days:
+        msg += f"⚠️ Уже были: {skipped_days} дн.\n"
+    if bad_times:
+        msg += f"❌ Не распознаны: {', '.join(bad_times)}\n"
+    msg += "\nКлиенты видят свободные даты! 🎉"
+
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN,
+                                    reply_markup=main_menu_kb(True))
+    return ConversationHandler.END
 
 async def admin_edit_price_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -706,6 +801,9 @@ async def admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif action == "edit_price":
         pass  # handled by ConversationHandler
 
+    elif action == "add_month":
+        pass  # handled by ConversationHandler
+
     elif action == "del_photo":
         items = get_portfolio()
         if not items:
@@ -805,6 +903,21 @@ def main():
         per_user=True,
     )
 
+    admin_month_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_add_month_start, pattern="^adm:add_month$")],
+        states={
+            ADMIN_WAIT_MONTH_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_got_month_date)],
+            ADMIN_WAIT_MONTH_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_got_month_time)],
+        },
+        fallbacks=[
+            CommandHandler("start",  cmd_start),
+            CommandHandler("cancel", cmd_cancel),
+        ],
+        per_message=False,
+        per_chat=True,
+        per_user=True,
+    )
+
     admin_price_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_edit_price_start, pattern="^adm:edit_price$")],
         states={
@@ -828,6 +941,7 @@ def main():
     app.add_handler(admin_slot_conv)
     app.add_handler(admin_photo_conv)
     app.add_handler(admin_price_conv)
+    app.add_handler(admin_month_conv)
     app.add_handler(CallbackQueryHandler(admin_callback,    pattern="^adm:"))
     app.add_handler(CallbackQueryHandler(admin_del_slot_cb, pattern="^adm_del:|^adm_close$"))
     app.add_handler(CallbackQueryHandler(admin_del_pic_cb,  pattern="^adm_delpic:"))
