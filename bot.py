@@ -481,7 +481,7 @@ async def booking_time_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(
         f"📋 *Почти готово!*\n\n"
         f"📅 {fmt_date(ctx.user_data['book_date'])}\n"
-        f"🕐 {parts[2]}\n\n"
+        f"🕐 {t}\n\n"
         "Введи своё *имя* и *номер телефона* через запятую:\n"
         "_Например: Анна, +79001234567_",
         parse_mode=ParseMode.MARKDOWN,
