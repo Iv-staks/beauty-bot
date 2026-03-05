@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import logging
 import calendar
@@ -701,7 +702,8 @@ async def admin_got_month_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def admin_got_month_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     no_weekend = "без выходных" in text.lower()
-    time_parts = [t.strip() for t in text.lower().replace("без выходных", "").split(",") if t.strip()]
+    clean = text.lower().replace("без выходных", "")
+    time_parts = [t.strip() for t in re.split(r"[,\s]+", clean) if t.strip()]
 
     times, bad_times = [], []
     for t in time_parts:
@@ -815,7 +817,9 @@ async def admin_got_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     d    = ctx.user_data.get("adm_date")
     added, skipped, errors = [], [], []
-    for t in [x.strip() for x in text.split(",")]:
+    # Принимаем запятую и пробел как разделитель
+    raw_times = re.split(r"[,\s]+", text)
+    for t in [x.strip() for x in raw_times if x.strip()]:
         try:
             datetime.strptime(t, "%H:%M")
             if add_slot(d, t):
