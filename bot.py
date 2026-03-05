@@ -100,6 +100,11 @@ def db_init():
             booked INTEGER DEFAULT 0,
             user_id INTEGER, username TEXT, name TEXT, phone TEXT
         );
+        CREATE TABLE IF NOT EXISTS reminders_sent (
+            slot_id INTEGER NOT NULL,
+            reminder_type TEXT NOT NULL,
+            PRIMARY KEY (slot_id, reminder_type)
+        );
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -120,6 +125,46 @@ def get_price_list():
 def set_price_list(text):
     with sqlite3.connect(DB) as c:
         c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('price_list',?)", (text,))
+
+
+def get_bookings_for_reminder(hours_before):
+    """Возвращает записи у которых через hours_before часов встреча и напоминание ещё не отправлено"""
+    now = datetime.now()
+    target = now + __import__("datetime").timedelta(hours=hours_before)
+    target_date = target.strftime("%Y-%m-%d")
+    target_time = target.strftime("%H:%M")
+    # Берём записи в окне ±10 минут от нужного времени
+    from datetime import timedelta
+    window_start = (target - timedelta(minutes=10)).strftime("%H:%M")
+    window_end   = (target + timedelta(minutes=10)).strftime("%H:%M")
+    reminder_type = f"{hours_before}h"
+    with sqlite3.connect(DB) as c:
+        return c.execute("""
+            SELECT s.id, s.date, s.time, s.user_id, s.name, s.phone
+            FROM slots s
+            WHERE s.booked=1
+              AND s.date=?
+              AND s.time>=? AND s.time<=?
+              AND s.user_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM reminders_sent r
+                  WHERE r.slot_id=s.id AND r.reminder_type=?
+              )
+        """, (target_date, window_start, window_end, reminder_type)).fetchall()
+
+def mark_reminder_sent(slot_id, hours_before):
+    reminder_type = f"{hours_before}h"
+    with sqlite3.connect(DB) as c:
+        c.execute("INSERT OR IGNORE INTO reminders_sent(slot_id,reminder_type) VALUES(?,?)",
+                  (slot_id, reminder_type))
+
+def get_all_bookings_with_userid():
+    today = date.today().strftime("%Y-%m-%d")
+    with sqlite3.connect(DB) as c:
+        return c.execute(
+            "SELECT id,date,time,name,username,phone,user_id FROM slots WHERE booked=1 AND date>=? ORDER BY date,time",
+            (today,)
+        ).fetchall()
 
 def get_free_dates():
     today = date.today().strftime("%Y-%m-%d")
@@ -205,7 +250,7 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 BOOK_TIME, BOOK_CONFIRM, RESCHEDULE_PICK = range(3)
-ADMIN_WAIT_DATE, ADMIN_WAIT_TIME, ADMIN_WAIT_PHOTO, ADMIN_WAIT_CAPTION, ADMIN_WAIT_PRICE, ADMIN_WAIT_MONTH_DATE, ADMIN_WAIT_MONTH_TIME = range(4, 11)
+ADMIN_WAIT_DATE, ADMIN_WAIT_TIME, ADMIN_WAIT_PHOTO, ADMIN_WAIT_CAPTION, ADMIN_WAIT_PRICE, ADMIN_WAIT_MONTH_DATE, ADMIN_WAIT_MONTH_TIME, ADMIN_RESCHEDULE_DATE, ADMIN_RESCHEDULE_TIME = range(4, 13)
 
 def fmt_date(d):
     try:
@@ -231,6 +276,33 @@ def is_admin(uid):
 # ══════════════════════════════════════════════════════════════
 #  /start и /cancel
 # ══════════════════════════════════════════════════════════════
+
+async def send_reminders(context):
+    """Фоновая задача: отправляет напоминания за 24ч и за 2ч"""
+    for hours in [24, 2]:
+        rows = get_bookings_for_reminder(hours)
+        for slot_id, d, t, user_id, name, phone in rows:
+            try:
+                if hours == 24:
+                    text = (
+                        f"⏰ *Напоминание!*\n\n"
+                        f"Вы записаны *завтра*:\n"
+                        f"📅 {fmt_date(d)} в 🕐 {t}\n\n"
+                        f"Ждём вас! 💅\n"
+                        f"Если планы изменились — отмените в разделе 📋 Мои записи"
+                    )
+                else:
+                    text = (
+                        f"⏰ *Скоро ваша запись!*\n\n"
+                        f"📅 {fmt_date(d)} в 🕐 {t}\n\n"
+                        f"Осталось всего 2 часа 💅"
+                    )
+                await context.bot.send_message(user_id, text, parse_mode="Markdown")
+                mark_reminder_sent(slot_id, hours)
+                logger.info(f"Reminder {hours}h sent to {user_id} for slot {slot_id}")
+            except Exception as e:
+                logger.warning(f"Failed to send reminder to {user_id}: {e}")
+
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ctx.user_data.clear()
@@ -660,6 +732,7 @@ async def admin_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📆 Добавить весь месяц",    callback_data="adm:add_month")],
             [InlineKeyboardButton("🗑 Удалить слот",         callback_data="adm:del_slot")],
             [InlineKeyboardButton("📋 Все записи",           callback_data="adm:bookings")],
+            [InlineKeyboardButton("🔄 Перенести запись",       callback_data="adm:reschedule")],
             [InlineKeyboardButton("🖼 Добавить в портфолио", callback_data="adm:add_photo")],
             [InlineKeyboardButton("🗑 Удалить из портфолио", callback_data="adm:del_photo")],
             [InlineKeyboardButton("💰 Редактировать прайс",   callback_data="adm:edit_price")],
@@ -785,6 +858,102 @@ async def admin_got_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+
+async def admin_rs_pick_slot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Мастер выбрал запись для переноса"""
+    q = update.callback_query
+    await q.answer()
+    old_slot_id = int(q.data.split(":")[1])
+    ctx.user_data["adm_rs_old_id"] = old_slot_id
+    with sqlite3.connect(DB) as c:
+        row = c.execute("SELECT date,time,name,phone FROM slots WHERE id=?", (old_slot_id,)).fetchone()
+    if not row:
+        await q.edit_message_text("⚠️ Запись не найдена.")
+        return ConversationHandler.END
+    d, t, name, phone = row
+    ctx.user_data["adm_rs_name"]  = name
+    ctx.user_data["adm_rs_phone"] = phone
+    await q.edit_message_text(
+        f"🔄 *Перенос записи*\n\n"
+        f"👤 {name} | 📞 {phone}\n"
+        f"📅 {fmt_date(d)} в 🕐 {t}\n\n"
+        "Введи *новую дату* в формате ДД.ММ.ГГГГ:\n"
+        "_Например: 15.06.2026_\n\n"
+        "/cancel — отмена",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return ADMIN_RESCHEDULE_DATE
+
+async def admin_rs_got_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        dt = datetime.strptime(text, "%d.%m.%Y")
+        if dt.date() < date.today():
+            await update.message.reply_text("⚠️ Дата уже прошла. Введи будущую дату:")
+            return ADMIN_RESCHEDULE_DATE
+        ctx.user_data["adm_rs_date"] = dt.strftime("%Y-%m-%d")
+        slots = get_free_slots(ctx.user_data["adm_rs_date"])
+        if not slots:
+            await update.message.reply_text(
+                f"😔 На *{fmt_date(ctx.user_data['adm_rs_date'])}* нет свободных слотов.\n\nВведи другую дату:",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return ADMIN_RESCHEDULE_DATE
+        kb = [[InlineKeyboardButton(f"🕐 {t}", callback_data=f"adm_rs_time:{sid}|{t}")] for sid, t in slots]
+        kb.append([InlineKeyboardButton("❌ Отмена", callback_data="adm_rs_cancel")])
+        await update.message.reply_text(
+            f"📅 *{fmt_date(ctx.user_data['adm_rs_date'])}*\n\nВыбери новое время:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+        return ADMIN_RESCHEDULE_TIME
+    except ValueError:
+        await update.message.reply_text("⚠️ Неверный формат. Введи дату так: *15.06.2026*", parse_mode=ParseMode.MARKDOWN)
+        return ADMIN_RESCHEDULE_DATE
+
+async def admin_rs_got_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if q.data == "adm_rs_cancel":
+        await q.edit_message_text("Перенос отменён.")
+        return ConversationHandler.END
+    _, rest = q.data.split(":", 1)
+    sid_str, new_time = rest.split("|", 1)
+    new_slot_id  = int(sid_str)
+    new_date     = ctx.user_data["adm_rs_date"]
+    old_slot_id  = ctx.user_data["adm_rs_old_id"]
+    name         = ctx.user_data["adm_rs_name"]
+    phone        = ctx.user_data["adm_rs_phone"]
+
+    # Получаем user_id клиента
+    with sqlite3.connect(DB) as c:
+        row = c.execute("SELECT user_id, username FROM slots WHERE id=?", (old_slot_id,)).fetchone()
+    user_id, username = row if row else (None, None)
+
+    cancel_booking(old_slot_id)
+    book_slot(new_slot_id, user_id, username or "", name, phone)
+
+    await q.edit_message_text(
+        f"✅ *Запись перенесена!*\n\n"
+        f"👤 {name} | 📞 {phone}\n"
+        f"📅 {fmt_date(new_date)} в 🕐 {new_time}",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=main_menu_kb(True)
+    )
+    # Уведомляем клиента
+    if user_id:
+        try:
+            await q.bot.send_message(
+                user_id,
+                f"🔄 *Ваша запись перенесена мастером*\n\n"
+                f"📅 {fmt_date(new_date)} в 🕐 {new_time}\n\n"
+                f"Если есть вопросы — напишите нам! 💅",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+    return ConversationHandler.END
+
 async def admin_add_slot_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -895,6 +1064,22 @@ async def admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for _, d, t, name, uname, phone in rows:
             text += f"📅 {fmt_date(d)} | 🕐 {t}\n👤 {name or '—'} | 📞 {phone or '—'}\n🆔 @{uname or '—'}\n\n"
         await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
+
+    elif action == "reschedule":
+        rows = get_all_bookings()
+        if not rows:
+            await q.edit_message_text("📋 Записей пока нет.")
+            return
+        kb = [[InlineKeyboardButton(
+            f"👤 {name or '?'} | 📅 {fmt_date(d)} {t}",
+            callback_data=f"adm_rs_pick:{sid}"
+        )] for sid, d, t, name, uname, phone in rows]
+        kb.append([InlineKeyboardButton("❌ Закрыть", callback_data="adm_close")])
+        await q.edit_message_text(
+            "🔄 *Перенести запись клиента*\n\nВыбери запись:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
 
     elif action == "del_slot":
         slots = get_all_slots_admin()
@@ -1064,11 +1249,29 @@ def main():
         per_user=True,
     )
 
+    admin_rs_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_rs_pick_slot, pattern="^adm_rs_pick:")],
+        states={
+            ADMIN_RESCHEDULE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_rs_got_date)],
+            ADMIN_RESCHEDULE_TIME: [
+                CallbackQueryHandler(admin_rs_got_time, pattern="^adm_rs_time:|^adm_rs_cancel$"),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("start",  cmd_start),
+            CommandHandler("cancel", cmd_cancel),
+        ],
+        per_message=False,
+        per_chat=True,
+        per_user=True,
+    )
+
     app.add_handler(CommandHandler("start",   cmd_start))
     app.add_handler(CommandHandler("cancel",  cmd_cancel))
     app.add_handler(CommandHandler("slots",   cmd_slots))
     app.add_handler(CommandHandler("addmonth", cmd_addmonth))
     app.add_handler(CommandHandler("addslot", cmd_addslot))
+    app.add_handler(admin_rs_conv)
     app.add_handler(reschedule_conv)
     app.add_handler(booking_conv)
     app.add_handler(admin_slot_conv)
@@ -1080,6 +1283,9 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_del_pic_cb,  pattern="^adm_delpic:"))
     app.add_handler(CallbackQueryHandler(my_cancel_cb,      pattern="^mycancel:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+
+    # Напоминания клиентам каждые 10 минут
+    app.job_queue.run_repeating(send_reminders, interval=600, first=10)
 
     logger.info("Бот запущен на Railway! 🚀")
     app.run_polling(drop_pending_updates=True)
