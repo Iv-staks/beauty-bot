@@ -374,7 +374,10 @@ async def cmd_addmonth(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             skipped_weekend += 1
             continue
         d_str = d.strftime("%Y-%m-%d")
-        day_added = any(add_slot(d_str, t) for t in times)
+        day_added = False
+        for t in times:
+            if add_slot(d_str, t):
+                day_added = True
         if day_added:
             added_days += 1
         else:
@@ -736,7 +739,10 @@ async def admin_got_month_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             skipped_weekend += 1
             continue
         d_str = d.strftime("%Y-%m-%d")
-        day_added = any(add_slot(d_str, t) for t in times)
+        day_added = False
+        for t in times:
+            if add_slot(d_str, t):
+                day_added = True
         if day_added:
             added_days += 1
         else:
