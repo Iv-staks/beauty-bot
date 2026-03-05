@@ -3,7 +3,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.context import ContextManagement
+from aiogram.fsm.context import FSMContext # Важно!
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "ТВОЙ_ТОКЕН_ИЗ_BOTFATHER"
