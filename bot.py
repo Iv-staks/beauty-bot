@@ -128,29 +128,53 @@ def set_price_list(text):
 
 
 def get_bookings_for_reminder(hours_before):
-    """Возвращает записи у которых через hours_before часов встреча и напоминание ещё не отправлено"""
-    now = datetime.now()
-    target = now + __import__("datetime").timedelta(hours=hours_before)
-    target_date = target.strftime("%Y-%m-%d")
-    target_time = target.strftime("%H:%M")
-    # Берём записи в окне ±10 минут от нужного времени
+    """
+    Возвращает записи которым нужно отправить напоминание.
+    Логика: берём все будущие записи и проверяем разницу во времени.
+    Окно: от hours_before-0.5ч до hours_before+0.5ч (30 минут).
+    Так напоминание точно не пропустится даже если задача запустилась с задержкой.
+    """
     from datetime import timedelta
-    window_start = (target - timedelta(minutes=10)).strftime("%H:%M")
-    window_end   = (target + timedelta(minutes=10)).strftime("%H:%M")
+    # TIMEZONE_OFFSET: разница между UTC (Railway) и местным временем мастера
+    # Москва = UTC+3, измени если нужно другой часовой пояс
+    tz_offset = int(os.environ.get("TZ_OFFSET", "12"))
+    now = datetime.utcnow() + timedelta(hours=tz_offset)
+
     reminder_type = f"{hours_before}h"
+    window_from = now + timedelta(hours=hours_before, minutes=-30)
+    window_to   = now + timedelta(hours=hours_before, minutes=30)
+
     with sqlite3.connect(DB) as c:
-        return c.execute("""
+        # Берём все активные записи в нужном диапазоне дат
+        rows = c.execute("""
             SELECT s.id, s.date, s.time, s.user_id, s.name, s.phone
             FROM slots s
             WHERE s.booked=1
-              AND s.date=?
-              AND s.time>=? AND s.time<=?
               AND s.user_id IS NOT NULL
+              AND s.date >= ?
+              AND s.date <= ?
               AND NOT EXISTS (
                   SELECT 1 FROM reminders_sent r
                   WHERE r.slot_id=s.id AND r.reminder_type=?
               )
-        """, (target_date, window_start, window_end, reminder_type)).fetchall()
+        """, (
+            window_from.strftime("%Y-%m-%d"),
+            window_to.strftime("%Y-%m-%d"),
+            reminder_type
+        )).fetchall()
+
+    # Фильтруем по точному datetime
+    result = []
+    for row in rows:
+        slot_id, d, t, user_id, name, phone = row
+        try:
+            slot_dt = datetime.strptime(f"{d} {t}", "%Y-%m-%d %H:%M")
+            diff_hours = (slot_dt - now).total_seconds() / 3600
+            if hours_before - 0.5 <= diff_hours <= hours_before + 0.5:
+                result.append(row)
+        except Exception:
+            pass
+    return result
 
 def mark_reminder_sent(slot_id, hours_before):
     reminder_type = f"{hours_before}h"
