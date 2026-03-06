@@ -338,8 +338,35 @@ def is_admin(uid):
 #  /start и /cancel
 # ══════════════════════════════════════════════════════════════
 
+
+def get_bookings_for_return_reminder():
+    """Записи где прошло 21 день после визита — напомнить записаться снова"""
+    from datetime import timedelta
+    now = local_now()
+    target_date = (now - timedelta(days=21)).strftime("%Y-%m-%d")
+    # Окно: ±1 день чтобы точно не пропустить
+    date_from = (now - timedelta(days=22)).strftime("%Y-%m-%d")
+    date_to   = (now - timedelta(days=20)).strftime("%Y-%m-%d")
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT ON (s.user_id) s.id, s.date, s.user_id, s.name
+            FROM slots s
+            WHERE s.booked=1
+              AND s.user_id IS NOT NULL
+              AND s.date >= %s AND s.date <= %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM reminders_sent r
+                  WHERE r.slot_id=s.id AND r.reminder_type='return_21d'
+              )
+            ORDER BY s.user_id, s.date DESC
+        """, (date_from, date_to))
+        return cur.fetchall()
+
 async def send_reminders(context):
-    """Фоновая задача: отправляет напоминания за 24ч и за 2ч"""
+    """Фоновая задача: отправляет напоминания за 24ч, за 2ч и через 21 день"""
+
+    # Напоминания о предстоящей записи
     for hours in [24, 2]:
         rows = get_bookings_for_reminder(hours)
         for slot_id, d, t, user_id, name, phone in rows:
@@ -363,6 +390,30 @@ async def send_reminders(context):
                 logger.info(f"Reminder {hours}h sent to {user_id} for slot {slot_id}")
             except Exception as e:
                 logger.warning(f"Failed to send reminder to {user_id}: {e}")
+
+    # Напоминание вернуться через 21 день
+    return_rows = get_bookings_for_return_reminder()
+    for slot_id, d, user_id, name in return_rows:
+        try:
+            text = (
+                f"💅 *{name}, привет!*\n\n"
+                f"Прошло почти 3 недели с вашего последнего визита —\n"
+                f"самое время обновить маникюр! ✨\n\n"
+                f"Записывайтесь прямо здесь 👇\n"
+                f"Нажмите 📅 *Записаться*"
+            )
+            await context.bot.send_message(user_id, text, parse_mode="Markdown")
+            # Помечаем чтобы не отправлять повторно
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO reminders_sent(slot_id,reminder_type) VALUES(%s,'return_21d') ON CONFLICT DO NOTHING",
+                    (slot_id,)
+                )
+                conn.commit()
+            logger.info(f"Return reminder sent to {user_id} for slot {slot_id}")
+        except Exception as e:
+            logger.warning(f"Failed to send return reminder to {user_id}: {e}")
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
