@@ -545,6 +545,8 @@ async def show_portfolio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 #  ЗАПИСЬ — КАЛЕНДАРЬ
 # ══════════════════════════════════════════════════════════════
 async def booking_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # Сбрасываем старый диалог если был
+    ctx.user_data.clear()
     free = get_free_dates()
     if not free:
         await update.message.reply_text(
@@ -552,7 +554,7 @@ async def booking_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Загляни позже или напиши мне напрямую!"
         )
         return ConversationHandler.END
-    now = datetime.now()
+    now = local_now()
     ctx.user_data["cal_year"]  = now.year
     ctx.user_data["cal_month"] = now.month
     await update.message.reply_text(
@@ -1234,6 +1236,8 @@ def main():
         per_message=False,
         per_chat=True,
         per_user=True,
+        allow_reentry=True,
+        conversation_timeout=300,  # 5 минут — сброс если клиент бросил
     )
 
     admin_slot_conv = ConversationHandler(
