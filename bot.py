@@ -805,7 +805,7 @@ async def reschedule_pick_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Получаем данные старой записи
     with get_db() as c:
-        cur2 = conn.cursor()
+        cur2 = c.cursor()
         cur2.execute("SELECT name, phone FROM slots WHERE id=%s", (old_slot_id,))
         old = cur2.fetchone()
 
@@ -982,7 +982,7 @@ async def admin_rs_pick_slot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     old_slot_id = int(q.data.split(":")[1])
     ctx.user_data["adm_rs_old_id"] = old_slot_id
     with get_db() as c:
-        cur2 = conn.cursor()
+        cur2 = c.cursor()
         cur2.execute("SELECT date,time,name,phone FROM slots WHERE id=%s", (old_slot_id,))
         row = cur2.fetchone()
     if not row:
@@ -1045,7 +1045,7 @@ async def admin_rs_got_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Получаем user_id клиента
     with get_db() as c:
-        cur2 = conn.cursor()
+        cur2 = c.cursor()
         cur2.execute("SELECT user_id, username FROM slots WHERE id=%s", (old_slot_id,))
         row = cur2.fetchone()
     user_id, username = row if row else (None, None)
