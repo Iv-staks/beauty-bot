@@ -1057,9 +1057,9 @@ async def admin_rs_got_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"✅ *Запись перенесена!*\n\n"
         f"👤 {name} | 📞 {phone}\n"
         f"📅 {fmt_date(new_date)} в 🕐 {new_time}",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu_kb(True)
+        parse_mode=ParseMode.MARKDOWN
     )
+    await q.message.reply_text("Готово!", reply_markup=main_menu_kb(True))
     # Уведомляем клиента
     if user_id:
         try:
@@ -1386,6 +1386,7 @@ def main():
         per_message=False,
         per_chat=True,
         per_user=True,
+        allow_reentry=True,
     )
 
     app.add_handler(CommandHandler("start",   cmd_start))
